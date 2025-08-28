@@ -1,4 +1,4 @@
-#!/bin/env python3
+#!/usr/bin/env python3
 
 import json
 import requests
@@ -31,7 +31,7 @@ url = 'https://ec2.shop?filter=m5.,x1.,x1e.,p3'
 data = ''
 headers = { 'accept': 'json' }
 pricing_info = requests.get(url, headers)
-pricing_dict = json.loads(pricing_info.text)
+pricing_dict = pricing_info.json()
 
 for instance in pricing_dict['Prices']:
     # {'InstanceType': 'x1e.16xlarge', 'Memory': '1952 GiB', 'VCPUS': 64, 'Storage': '1 x 1920 SSD', 'Network': '10 Gigabit', 'Cost': 13.344, 'MonthlyPrice': 9741.119999999999, 'SpotPrice': '4.0032'}
