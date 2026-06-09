@@ -82,6 +82,12 @@ rm -f $conn_file_admin
 # Create tables in the analysis database
 mysql --defaults-file=$conn_file_user $analysisdb -e "create table if not exists Amazon(instancetype varchar(50) not null default '-', cores int(11) default NULL, mem int(11) default NULL, gpus int(11) not null default '0', latestreservedcost int(11) default NULL, latestspotcost int(11) default NULL, primary key(instancetype));"
 
-mysql --defaults-file=$conn_file_user $analysisdb -e "create table if not exists jobinfo(dbid bigint unsigned not null default -1, jobid bigint(20) not null default -1, runtime int(11) not null default 0, enddate date not null default '2000-01-01', cores int(11) not null default 0, mem int(11) not null default 0, gpus int(11) not null default 0, nodes int(11) not null default 0, part varchar(32) not null default '-', primary key(dbid), index(part));"
+mysql --defaults-file=$conn_file_user $analysisdb -e "create table if not exists jobinfo(dbid bigint unsigned not null default -1, jobid bigint(20) not null default -1, runtime int(11) not null default 0, enddate date not null default '2000-01-01', cores int(11) not null default 0, mem int(11) not null default 0, gpus int(11) not null default 0, nodes int(11) not null default 0, part varchar(32) not null default '-', account varchar(64) not null default '-', username varchar(64) not null default '-', uid int(10) unsigned not null default 0, primary key(dbid), index(part), index(account), index(username), index(uid));"
+
+# Upgrade path: add account/user columns (and their indexes) to a pre-existing jobinfo
+# table that was created before these fields were tracked.  These statements are
+# idempotent on MariaDB thanks to 'IF NOT EXISTS'.
+mysql --defaults-file=$conn_file_user $analysisdb -e "alter table jobinfo add column if not exists account varchar(64) not null default '-', add column if not exists username varchar(64) not null default '-', add column if not exists uid int(10) unsigned not null default 0;"
+mysql --defaults-file=$conn_file_user $analysisdb -e "alter table jobinfo add index if not exists account (account), add index if not exists username (username), add index if not exists uid (uid);"
 
 mysql --defaults-file=$conn_file_user $analysisdb -e "create table if not exists Amazonjobcost(dbid bigint unsigned not null default -1, jobid bigint(20) not null default -1, instancetype varchar(50) not null default '-', origreservedcost int(11) not null default 0, origspotcost int(11) not null default 0, latestreservedcost int(11) not null default 0, latestspotcost int(11) not null default 0, primary key(dbid), index(instancetype));"

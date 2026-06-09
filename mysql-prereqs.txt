@@ -11,17 +11,20 @@ MariaDB [slurm_analysis]> show tables;
 +--------------------------+
 
 MariaDB [slurm_analysis]> describe jobinfo;
-+---------+------------+------+-----+---------+-------+
-| Field   | Type       | Null | Key | Default | Extra |
-+---------+------------+------+-----+---------+-------+
-| jobid   | bigint(20) | NO   | PRI | NULL    |       |
-| runtime | int(11)    | NO   |     | NULL    |       |
-| enddate | date       | NO   |     | NULL    |       |
-| cores   | int(11)    | NO   |     | NULL    |       |
-| mem     | int(11)    | NO   |     | NULL    |       |
-| nodes   | int(11)    | NO   |     | NULL    |       |
-| gpus    | int(11)    | NO   |     | NULL    |       |
-+---------+------------+------+-----+---------+-------+
++----------+------------------+------+-----+------------+-------+
+| Field    | Type             | Null | Key | Default    | Extra |
++----------+------------------+------+-----+------------+-------+
+| jobid    | bigint(20)       | NO   | PRI | NULL       |       |
+| runtime  | int(11)          | NO   |     | NULL       |       |
+| enddate  | date             | NO   |     | NULL       |       |
+| cores    | int(11)          | NO   |     | NULL       |       |
+| mem      | int(11)          | NO   |     | NULL       |       |
+| nodes    | int(11)          | NO   |     | NULL       |       |
+| gpus     | int(11)          | NO   |     | NULL       |       |
+| account  | varchar(64)      | NO   | MUL | -          |       |
+| username | varchar(64)      | NO   | MUL | -          |       |
+| uid      | int(10) unsigned | NO   | MUL | 0          |       |
++----------+------------------+------+-----+------------+-------+
 
 MariaDB [slurm_analysis]> describe Amazon;
 +--------------------+-------------+------+-----+---------+-------+
@@ -50,6 +53,10 @@ MariaDB [slurm_analysis]> describe Amazonjobcost;
 So now a little explanations on these.
 
 The 'jobinfo' table is used to extract job requirements from slurm for purposes of sizing the Amazon job instance. 'mem' is in GB.
+'account' is the slurm account (project) the job was charged to, taken directly from the slurm job table. 'uid' is the numeric
+UID of the submitting user (slurm's id_user), and 'username' is that UID resolved to a name via the system password database at
+import time (falling back to 'uid-<N>' when the UID cannot be resolved on the import host). Together these enable per-project and
+per-user utilisation/cost reporting; see 03-calculate-total-aws-compute-cost.py's --account/--user/--by-account/--by-user options.
 
 The 'Amazon' table, similarly holds the Amazon EC2 instance types and their specs. Again 'mem' is in GB. 'lastestreservedcost' and 'latestspotcost' are in hundredths of cents per hour[1]. I update this table manually.
 

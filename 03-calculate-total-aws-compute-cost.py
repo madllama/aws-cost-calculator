@@ -5,8 +5,9 @@ import pymysql
 from datetime import date, datetime, timedelta
 import calendar
 import time
+import sys
 from os.path import expanduser
-import argparse 
+import argparse
 
 # Create an ArgumentParser object to easily handle command-line options and
 # auto-generate helpful CLI help when -h/--help flags are used.
@@ -45,6 +46,22 @@ parser.add_argument('--partition',
                     dest='partition',
                     type=str,
                     help='Limit analysis to jobs in the specified slurm partition')
+parser.add_argument('--account',
+                    dest='account',
+                    type=str,
+                    help='Limit analysis to jobs charged to the specified slurm account (project)')
+parser.add_argument('--user',
+                    dest='user',
+                    type=str,
+                    help='Limit analysis to jobs submitted by the specified user')
+parser.add_argument('--by-account',
+                    dest='by_account',
+                    action='store_true',
+                    help='Report a per-account (project) breakdown of costs over the selected date range')
+parser.add_argument('--by-user',
+                    dest='by_user',
+                    action='store_true',
+                    help='Report a per-user breakdown of costs over the selected date range')
 parser.add_argument('-p', '--parsable',
                     dest='parsable',
                     action='store_true',
@@ -75,7 +92,92 @@ dbcost = pymysql.connect(read_default_file=defaults_file)
 cursorcost = dbcost.cursor()
 
 
+# Build the list of WHERE-clause conditions implied by the partition/account/user
+# filter flags.  These are shared by every report mode so that --partition,
+# --account, and --user can be combined freely.
+def build_filter_clauses():
+    clauses = []
+    if args.partition is not None:
+        clauses.append("jobinfo.part = '" + args.partition + "'")
+    if args.account is not None:
+        clauses.append("jobinfo.account = '" + args.account + "'")
+    if args.user is not None:
+        clauses.append("jobinfo.username = '" + args.user + "'")
+    return clauses
+
+# Convenience: return the filter conditions as a string to append to a query that
+# already has a WHERE clause (i.e., prefixed with ' AND '), or '' when no filters.
+def filter_and():
+    clauses = build_filter_clauses()
+    if clauses:
+        return " AND " + " AND ".join(clauses)
+    return ""
+
+
 # Generate output based on the CLI flags.  This is admittedly rough.
+
+
+#
+# Per-account / per-user breakdown.  When requested, this replaces the scalar
+# summaries below with a grouped table over the selected date range, then exits.
+#
+if args.by_account or args.by_user:
+    if args.by_account and args.by_user:
+        print("Specify only one of --by-account / --by-user", file=sys.stderr)
+        sys.exit(1)
+
+    group_col = "jobinfo.account" if args.by_account else "jobinfo.username"
+    group_header = "Account" if args.by_account else "User"
+
+    # Resolve the reporting date range.  Mirrors the precedence used elsewhere in
+    # this script: --days wins, then --start/--end, otherwise all-time.
+    startdate = None
+    enddate = None
+    if args.days is not None:
+        startdate = (datetime.now() - timedelta(days=ndays)).strftime("%Y-%m-%d")
+        enddate = (datetime.now() - timedelta(days=1)).strftime("%Y-%m-%d")
+    elif (args.start is not None) or (args.end is not None):
+        startdate = args.start if args.start is not None else (datetime.now() - timedelta(days=ndays)).strftime("%Y-%m-%d")
+        enddate = args.end if args.end is not None else (datetime.now()).strftime("%Y-%m-%d")
+
+    where = []
+    if startdate is not None:
+        where.append("jobinfo.enddate >= '" + startdate + "'")
+    if enddate is not None:
+        where.append("jobinfo.enddate <= '" + enddate + "'")
+    where += build_filter_clauses()
+
+    sql = ("SELECT " + group_col + " AS grp, SUM(Amazonjobcost.origspotcost), "
+           "SUM(Amazonjobcost.origreservedcost), COUNT(*) "
+           "FROM Amazonjobcost INNER JOIN jobinfo USING (dbid)")
+    if where:
+        sql += " WHERE " + " AND ".join(where)
+    sql += " GROUP BY grp ORDER BY SUM(Amazonjobcost.origreservedcost) DESC"
+    cursorcost.execute(sql)
+    rows = cursorcost.fetchall()
+
+    if args.parsable:
+        if args.headers:
+            print("%s,Spot,Reserved,Jobs" % group_header)
+        for row in rows:
+            grp = row[0] if row[0] is not None else "-"
+            spot = row[1]/100 if row[1] else 0
+            reserved = row[2]/100 if row[2] else 0
+            jobs = row[3]
+            print("%s|%s|%s|%s" % (grp, spot, reserved, jobs))
+    else:
+        if args.headers:
+            print("%-24s %15s %15s %10s" % (group_header, "Spot-Pricing", "Reserved", "Jobs"))
+            print("------------------------------------------------------------------")
+        for row in rows:
+            grp = row[0] if row[0] is not None else "-"
+            spot = '${:,.0f}'.format(row[1]/100) if row[1] else "$0"
+            reserved = '${:,.0f}'.format(row[2]/100) if row[2] else "$0"
+            jobs = row[3]
+            print("%-24s %15s %15s %10d" % (grp, spot, reserved, jobs))
+
+    dbcost.close()
+    sys.exit(0)
 
 #
 # First, consider when no CLI flags are given.  Output a table of costs for common times-of-interest.
@@ -85,8 +187,7 @@ if (args.start is None) and (args.end is None) and (args.days is None):
 
     # Last 1 day pricing
     sql = "SELECT SUM(Amazonjobcost.origreservedcost),SUM(Amazonjobcost.origspotcost) FROM Amazonjobcost INNER JOIN jobinfo USING (dbid) WHERE jobinfo.enddate >= '" + (datetime.now()).strftime("%Y-%m-%d") + "' AND jobinfo.enddate <= '" + (datetime.now()).strftime("%Y-%m-%d")  + "'"
-    if args.partition is not None:
-        sql += " AND jobinfo.part = '" + args.partition + "'"
+    sql += filter_and()
     cursorcost.execute(sql)
     data=cursorcost.fetchone()
     spot1 = "$0"
@@ -98,8 +199,7 @@ if (args.start is None) and (args.end is None) and (args.days is None):
 
     # Last 7 days pricing
     sql = "SELECT SUM(Amazonjobcost.origreservedcost),SUM(Amazonjobcost.origspotcost) FROM Amazonjobcost INNER JOIN jobinfo USING (dbid) WHERE jobinfo.enddate >= '" + (datetime.now() - timedelta(days=7)).strftime("%Y-%m-%d") + "' AND jobinfo.enddate <= '" + (datetime.now()).strftime("%Y-%m-%d")  + "'"
-    if args.partition is not None:
-        sql += " AND jobinfo.part = '" + args.partition + "'"
+    sql += filter_and()
     cursorcost.execute(sql)
     data=cursorcost.fetchone()
     spot7 = "$0"
@@ -111,8 +211,7 @@ if (args.start is None) and (args.end is None) and (args.days is None):
 
     # Last 14 days pricing
     sql = "SELECT SUM(Amazonjobcost.origreservedcost),SUM(Amazonjobcost.origspotcost) FROM Amazonjobcost INNER JOIN jobinfo USING (dbid) WHERE jobinfo.enddate >= '" + (datetime.now() - timedelta(days=14)).strftime("%Y-%m-%d") + "' AND jobinfo.enddate <= '" + (datetime.now()).strftime("%Y-%m-%d")  + "'"
-    if args.partition is not None:
-        sql += " AND jobinfo.part = '" + args.partition + "'"
+    sql += filter_and()
     cursorcost.execute(sql)
     data=cursorcost.fetchone()
     spot14 = "$0"
@@ -124,8 +223,7 @@ if (args.start is None) and (args.end is None) and (args.days is None):
 
     # Last 30 days pricing
     sql = "SELECT SUM(Amazonjobcost.origreservedcost),SUM(Amazonjobcost.origspotcost) FROM Amazonjobcost INNER JOIN jobinfo USING (dbid) WHERE jobinfo.enddate >= '" + (datetime.now() - timedelta(days=30)).strftime("%Y-%m-%d") + "' AND jobinfo.enddate <= '" + (datetime.now()).strftime("%Y-%m-%d")  + "'"
-    if args.partition is not None:
-        sql += " AND jobinfo.part = '" + args.partition + "'"
+    sql += filter_and()
     cursorcost.execute(sql)
     data=cursorcost.fetchone()
     spot30 = "$0"
@@ -137,8 +235,7 @@ if (args.start is None) and (args.end is None) and (args.days is None):
 
     # Last 60 days pricing
     sql = "SELECT SUM(Amazonjobcost.origreservedcost),SUM(Amazonjobcost.origspotcost) FROM Amazonjobcost INNER JOIN jobinfo USING (dbid) WHERE jobinfo.enddate >= '" + (datetime.now() - timedelta(days=60)).strftime("%Y-%m-%d") + "' AND jobinfo.enddate <= '" + (datetime.now()).strftime("%Y-%m-%d")  + "'"
-    if args.partition is not None:
-        sql += " AND jobinfo.part = '" + args.partition + "'"
+    sql += filter_and()
     cursorcost.execute(sql)
     data=cursorcost.fetchone()
     spot60 = "$0"
@@ -150,8 +247,7 @@ if (args.start is None) and (args.end is None) and (args.days is None):
 
     # Last 90 days pricing
     sql = "SELECT SUM(Amazonjobcost.origreservedcost),SUM(Amazonjobcost.origspotcost) FROM Amazonjobcost INNER JOIN jobinfo USING (dbid) WHERE jobinfo.enddate >= '" + (datetime.now() - timedelta(days=90)).strftime("%Y-%m-%d") + "' AND jobinfo.enddate <= '" + (datetime.now()).strftime("%Y-%m-%d")  + "'"
-    if args.partition is not None:
-        sql += " AND jobinfo.part = '" + args.partition + "'"
+    sql += filter_and()
     cursorcost.execute(sql)
     data=cursorcost.fetchone()
     spot90 = "$0"
@@ -163,8 +259,7 @@ if (args.start is None) and (args.end is None) and (args.days is None):
 
     # Last 365 days pricing
     sql = "SELECT SUM(Amazonjobcost.origreservedcost),SUM(Amazonjobcost.origspotcost) FROM Amazonjobcost INNER JOIN jobinfo USING (dbid) WHERE jobinfo.enddate >= '" + (datetime.now() - timedelta(days=365)).strftime("%Y-%m-%d") + "' AND jobinfo.enddate <= '" + (datetime.now()).strftime("%Y-%m-%d")  + "'"
-    if args.partition is not None:
-        sql += " AND jobinfo.part = '" + args.partition + "'"
+    sql += filter_and()
     cursorcost.execute(sql)
     data=cursorcost.fetchone()
     spot365 = "$0"
@@ -177,8 +272,9 @@ if (args.start is None) and (args.end is None) and (args.days is None):
 
     # All-time pricing
     sql = "SELECT SUM(origreservedcost),SUM(origspotcost) FROM Amazonjobcost"
-    if args.partition is not None:
-        sql += " INNER JOIN jobinfo USING (dbid) WHERE jobinfo.part = '" + args.partition + "'"
+    all_time_clauses = build_filter_clauses()
+    if all_time_clauses:
+        sql += " INNER JOIN jobinfo USING (dbid) WHERE " + " AND ".join(all_time_clauses)
     cursorcost.execute(sql)
     data=cursorcost.fetchone()
     reservedall = "$0"
@@ -217,8 +313,7 @@ if (args.days is None) and (not (args.monthly or args.weekly or args.daily))  an
     if args.end is not None:
         enddate = args.end
     sql = "SELECT SUM(Amazonjobcost.origreservedcost),SUM(Amazonjobcost.origspotcost) FROM Amazonjobcost INNER JOIN jobinfo USING (dbid) WHERE jobinfo.enddate >= '" + startdate + "' AND jobinfo.enddate <= '" + enddate  + "'"
-    if args.partition is not None:
-        sql += " AND jobinfo.part = '" + args.partition + "'"
+    sql += filter_and()
     cursorcost.execute(sql)
     data=cursorcost.fetchone()
     spot1 = "0"
@@ -291,8 +386,7 @@ if (args.days is None) and (args.monthly or args.weekly or args.daily)  and (arg
         enddate = current_end_date.strftime("%Y-%m-%d")
 
         sql = "SELECT SUM(Amazonjobcost.origreservedcost),SUM(Amazonjobcost.origspotcost) FROM Amazonjobcost INNER JOIN jobinfo USING (dbid) WHERE jobinfo.enddate >= '" + startdate + "' AND jobinfo.enddate <= '" + enddate  + "'"
-        if args.partition is not None:
-            sql += " AND jobinfo.part = '" + args.partition + "'"
+        sql += filter_and()
         cursorcost.execute(sql)
         data=cursorcost.fetchone()
         spot1 = "0"
@@ -333,8 +427,7 @@ if (args.days is not None):
     enddate = (datetime.now() - timedelta(days=1)).strftime("%Y-%m-%d")
 
     sql = "SELECT SUM(Amazonjobcost.origreservedcost),SUM(Amazonjobcost.origspotcost) FROM Amazonjobcost INNER JOIN jobinfo USING (dbid) WHERE jobinfo.enddate >= '" + startdate + "' AND jobinfo.enddate <= '" + enddate  + "'"
-    if args.partition is not None:
-        sql += " AND jobinfo.part = '" + args.partition + "'"
+    sql += filter_and()
     cursorcost.execute(sql)
     data=cursorcost.fetchone()
     spot1 = "0"

@@ -30,6 +30,15 @@ All of the python scripts accept CLI arguments.  Pass the `-h` flag to them to g
     - This step is much faster than the job-import step, but may still take a long time for large job-counts.
 5. Finally, calculate the cumulative AWS costs with `03-calculate-total-aws-compute-cost.py`.
 
+### Per-project and per-user reporting
+
+In addition to whole-cluster totals, `03-calculate-total-aws-compute-cost.py` can report utilisation/cost at the project (slurm account) and user level:
+
+- `--account ACCOUNT` / `--user USER` restrict any report (including the date-range and periodic-summary modes) to a single project or user. These combine with each other and with `--partition`.
+- `--by-account` / `--by-user` produce a breakdown table with one row per project/user, sorted by reserved cost (descending), with spot cost, reserved cost, and job count columns. These respect the selected date range (`--days`, or `--start`/`--end`, otherwise all-time) along with any `--partition`/`--account`/`--user` filters, and honour `--parsable`/`--with-headers`.
+
+The project (account) and user attribution comes from the `account` and `username`/`uid` columns added to the `jobinfo` table; these are populated by `01-import-job-info.py`, so re-run the import step to backfill attribution for previously-imported jobs. The username is resolved from slurm's numeric `id_user` against the import host's password database (falling back to `uid-<N>`), so run the import on a host that can resolve your cluster's UIDs for human-readable names.
+
 Separate from the AWS computation cost, you can get rough storage cost estimates using `04-calculate-aws-storage-cost.py`.  This script simply shows
 AWS storage costs for various storage services (EBS, S3, Glacier) for several filesystems, both for the currently-used storage quantity as well as 
 the fileystems' maximum capacity.

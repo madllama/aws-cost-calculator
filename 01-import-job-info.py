@@ -8,6 +8,7 @@ import time
 from os.path import expanduser
 import subprocess
 import argparse
+import pwd
 
 # Create an ArgumentParser object to easily handle command-line options and
 # auto-generate helpful CLI help when -h/--help flags are used.
@@ -119,12 +120,29 @@ cursorslurm = dbslurm.cursor()
 
 try:
     # Build SQL query.  Note back-ticks for cases with non-standard characters in the job table name.
-    sql = "SELECT job_db_inx,id_job,time_start,time_end,tres_alloc,gres_used,`partition` FROM `" + job_table + "` WHERE tres_alloc <> '' AND time_start > " + str(startdate) + " AND time_end < " + str(enddate) + " AND time_end <>0"
+    sql = "SELECT job_db_inx,id_job,time_start,time_end,tres_alloc,gres_used,`partition`,account,id_user FROM `" + job_table + "` WHERE tres_alloc <> '' AND time_start > " + str(startdate) + " AND time_end < " + str(enddate) + " AND time_end <>0"
     cursorslurm.execute(sql)
 except:
     # Try with older query
-    sql = "SELECT job_db_inx,id_job,time_start,time_end,tres_alloc,gres_alloc,`partition` FROM `" + job_table + "` WHERE tres_alloc <> '' AND time_start > " + str(startdate) + " AND time_end < " + str(enddate) + " AND time_end <>0"
+    sql = "SELECT job_db_inx,id_job,time_start,time_end,tres_alloc,gres_alloc,`partition`,account,id_user FROM `" + job_table + "` WHERE tres_alloc <> '' AND time_start > " + str(startdate) + " AND time_end < " + str(enddate) + " AND time_end <>0"
     cursorslurm.execute(sql)
+
+
+# Cache for resolving numeric slurm UIDs to usernames.  The slurm job table only
+# records the submitting user's numeric UID (id_user), so we resolve it to a
+# username via the system password database.  Results are cached to avoid
+# repeated lookups, and UIDs that cannot be resolved on this host fall back to a
+# stable 'uid-<N>' placeholder so per-user reporting still has something to group on.
+uid_name_cache = {}
+def resolve_username(uid):
+    if uid in uid_name_cache:
+        return uid_name_cache[uid]
+    try:
+        name = pwd.getpwuid(uid).pw_name
+    except (KeyError, TypeError, OverflowError):
+        name = "uid-" + str(uid)
+    uid_name_cache[uid] = name
+    return name
 
 
 
@@ -145,6 +163,9 @@ while True:
             gres = dict(s.split(':',1) for s in data[5].split(",")) 
             pass 
         part = data[6]
+        account = data[7] if data[7] is not None else '-'
+        uid = int(data[8]) if data[8] is not None else 0
+        username = resolve_username(uid)
 
         # NOTE: Your trackables resources may be different than mine. I'm not positive how things change site-to-site.
         # Separate out the tres
@@ -176,7 +197,10 @@ while True:
             continue
 
         # Insert data into analysis job info table.  REPLACE is used so that re-processing slurm jobs will update values as necessary.
-        sql2 = "REPLACE INTO jobinfo (dbid, jobid, runtime, enddate, cores, mem, nodes, gpus, part) VALUES (" + str(dbid) + "," + str(jobid) + "," + str(runtime) + ",'" + enddate + "'," + str(cores) + "," + str(mem) + "," + str(nodes) + "," + str(gpus) + ",'" + str(part) + "')"
+        # account and username originate from slurm/system data, so escape them to guard against stray quotes.
+        account_esc = dbcost.escape_string(str(account))
+        username_esc = dbcost.escape_string(str(username))
+        sql2 = "REPLACE INTO jobinfo (dbid, jobid, runtime, enddate, cores, mem, nodes, gpus, part, account, username, uid) VALUES (" + str(dbid) + "," + str(jobid) + "," + str(runtime) + ",'" + enddate + "'," + str(cores) + "," + str(mem) + "," + str(nodes) + "," + str(gpus) + ",'" + str(part) + "','" + account_esc + "','" + username_esc + "'," + str(uid) + ")"
         cursorcost.execute(sql2)
         dbcost.commit()
     
